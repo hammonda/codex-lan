@@ -1,0 +1,31 @@
+[workspace]
+members = ["crates/core", "crates/desktop"]
+resolver = "2"
+
+[workspace.package]
+version = "0.4.4"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+futures-util = { version = "0.3", features = ["sink"] }
+tokio-tungstenite = "0.30"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = { version = "0.14", features = ["pem"] }
+sha2 = "0.10"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4", "serde"] }
+gethostname = "1.1"
+eframe = { version = "0.37", default-features = false, features = ["clipboard", "default_fonts", "glow", "wayland", "x11"] }
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+strip = true

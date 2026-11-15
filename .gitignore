@@ -1,0 +1,6 @@
+/target/
+/dist/
+/.codex-lan/
+*.log
+__pycache__/
+*.py[cod]
