@@ -4,7 +4,7 @@ Version **0.4.4**, protocol **4**. Checked on 15 November 2026 with Rust 1.99.0 
 
 ## Automated checks
 
-All **55 tests** pass: 22 core/network tests and 33 desktop tests. Formatting and strict Clippy checks pass with all workspace targets and features enabled. Run the commands in the [README](../README.md#development).
+All **57 tests** pass: 24 core/network tests and 33 desktop tests. Formatting and strict Clippy checks pass with all workspace targets and features enabled. Run the commands in the [README](../README.md#development).
 
 | Area | Coverage |
 | --- | --- |
@@ -14,7 +14,7 @@ All **55 tests** pass: 22 core/network tests and 33 desktop tests. Formatting an
 | Usage | Cumulative snapshots without double counting, cached-token pricing, missing/invalid counts, exact model IDs, account allowance updates and client identity |
 | Interface | Output levels, readable/JSON disclosure, streaming, copying, embedded close targets, Enter/Shift+Enter, block cursor, prompt wrapping and live server totals |
 
-Tests use a deterministic fake Codex executable and local loopback connections. They make no OpenAI requests. The optional live examples are separate and consume model usage.
+Tests use a deterministic fake Codex executable and local loopback connections. Its log reader tolerates incomplete writes, including split UTF-8 characters, while rejecting malformed complete records. Tests make no OpenAI requests. The optional live examples are separate and consume model usage.
 
 ## Manual checks and limits
 

@@ -1,11 +1,12 @@
 #![cfg(feature = "test-support")]
 
+mod support;
+
 use codex_lan_core::{
     bridge::{BridgeConfig, CodexBridge},
     protocol::{ClientCommand, ServerEvent},
     transport::{ClientConfig, MonitorEvent, ServerConfig, run_client, run_server},
 };
-use serde_json::Value;
 use std::{collections::HashSet, time::Duration};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -111,13 +112,7 @@ async fn account_usage_arrives_without_threads_and_disconnect_deletes_busy_and_i
         );
         assert_eq!(codex.plan.as_deref(), Some("plus"));
     }
-    let calls = || {
-        std::fs::read_to_string(temp.path().join("fixture-rpc.jsonl"))
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str::<Value>(line).unwrap())
-            .collect::<Vec<_>>()
-    };
+    let calls = || support::calls(temp.path());
     assert!(
         !calls()
             .iter()

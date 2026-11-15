@@ -1,10 +1,12 @@
 #![cfg(feature = "test-support")]
 
+mod support;
+
 use codex_lan_core::{
     bridge::{BridgeConfig, CodexBridge},
     protocol::ServerEvent,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use std::{collections::HashSet, path::Path, time::Duration};
 use tokio::sync::broadcast;
 
@@ -101,11 +103,7 @@ async fn sessions_use_separate_directories_and_keep_their_files_after_cleanup() 
     assert!(sessions[0].1.join("download.pdf").is_file());
     bridge.shutdown().await.unwrap();
 
-    let records: Vec<Value> = std::fs::read_to_string(root.join("fixture-rpc.jsonl"))
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
+    let records = support::calls(&root);
     let creations: Vec<_> = records
         .iter()
         .filter(|call| call["method"] == "thread/start")

@@ -1,11 +1,14 @@
 #![cfg(feature = "test-support")]
 
+mod support;
+
 use codex_lan_core::{
     bridge::{BridgeConfig, CodexBridge},
     protocol::{ServerEvent, SessionOptions},
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use std::{path::Path, time::Duration};
+use support::calls;
 use tokio::sync::broadcast;
 
 async fn bridge(root: &Path, state: &Path) -> CodexBridge {
@@ -17,14 +20,6 @@ async fn bridge(root: &Path, state: &Path) -> CodexBridge {
     })
     .await
     .unwrap()
-}
-
-fn calls(root: &Path) -> Vec<Value> {
-    std::fs::read_to_string(root.join("fixture-rpc.jsonl"))
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect()
 }
 
 async fn until_finished(events: &mut broadcast::Receiver<ServerEvent>) -> Vec<ServerEvent> {

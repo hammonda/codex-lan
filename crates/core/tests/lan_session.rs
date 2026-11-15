@@ -1,11 +1,14 @@
 #![cfg(feature = "test-support")]
 
+mod support;
+
 use codex_lan_core::{
     bridge::{BridgeConfig, CodexBridge},
     protocol::{ClientCommand, ServerEvent, SessionOptions},
     transport::{ClientConfig, MonitorEvent, ServerConfig, run_client, run_server},
 };
 use std::{path::Path, time::Duration};
+use support::calls;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -23,14 +26,6 @@ async fn event(
     })
     .await
     .expect("timed out waiting for client event")
-}
-
-fn calls(workspace: &Path) -> Vec<serde_json::Value> {
-    std::fs::read_to_string(workspace.join("fixture-rpc.jsonl"))
-        .unwrap_or_default()
-        .lines()
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

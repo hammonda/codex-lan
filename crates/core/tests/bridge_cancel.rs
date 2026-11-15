@@ -1,15 +1,10 @@
 #![cfg(feature = "test-support")]
 
-use codex_lan_core::bridge::{BridgeConfig, CodexBridge};
-use std::{path::Path, time::Duration};
+mod support;
 
-fn calls(workspace: &Path) -> Vec<serde_json::Value> {
-    std::fs::read_to_string(workspace.join("fixture-rpc.jsonl"))
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .collect()
-}
+use codex_lan_core::bridge::{BridgeConfig, CodexBridge};
+use std::time::Duration;
+use support::calls;
 
 async fn wait_until(mut condition: impl FnMut() -> bool) {
     tokio::time::timeout(Duration::from_secs(5), async {
