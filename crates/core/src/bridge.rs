@@ -43,7 +43,7 @@ const MAX_BUFFERED_NATIVE_EVENTS: usize = 512;
 
 pub struct BridgeConfig {
     pub executable: PathBuf,
-    /// Parent directory for persistent, separate session workspaces.
+    /// Allowed root for prepared directories and automatic session workspaces.
     pub workspace: PathBuf,
     pub state_dir: PathBuf,
     pub model: Option<String>,
@@ -458,19 +458,32 @@ impl CodexBridge {
             .as_deref()
             .map(str::trim)
             .filter(|path| !path.is_empty());
+        ensure!(
+            !options.require_existing_workspace || override_path.is_some(),
+            "A prepared workspace path is required"
+        );
+        let mut protected = vec![self.inner.state_dir.clone()];
+        protected.extend(
+            self.inner
+                .sessions
+                .lock()
+                .unwrap()
+                .values()
+                .map(|session| session.workspace.clone()),
+        );
         let workspace = if let Some(path) = override_path {
-            let mut protected = vec![self.inner.state_dir.clone()];
-            protected.extend(
-                self.inner
-                    .sessions
-                    .lock()
-                    .unwrap()
-                    .values()
-                    .map(|session| session.workspace.clone()),
-            );
-            resolve_session_workspace(&self.inner.workspace, path, &protected)?
+            resolve_session_workspace(
+                &self.inner.workspace,
+                path,
+                &protected,
+                if options.require_existing_workspace {
+                    DirectoryMode::Existing
+                } else {
+                    DirectoryMode::Create
+                },
+            )?
         } else {
-            create_session_workspace(&self.inner.workspace, name)?
+            create_session_workspace(&self.inner.workspace, name, &protected)?
         };
         ensure!(
             !self.inner.sessions.lock().unwrap().values().any(|session| {
@@ -568,6 +581,13 @@ impl CodexBridge {
     /// A failed or timed-out submission is never silently retried unless Codex
     /// explicitly rejects steering because the previous turn has ended.
     pub async fn prompt(&self, id: &str, text: &str) -> Result<bool> {
+        self.prompt_with_turn(id, text)
+            .await
+            .map(|(steered, _)| steered)
+    }
+
+    /// Returns the accepted native turn ID even if that turn completes before its acknowledgement.
+    pub async fn prompt_with_turn(&self, id: &str, text: &str) -> Result<(bool, String)> {
         ensure!(!text.trim().is_empty(), "Prompt cannot be empty");
         ensure!(text.len() <= 256 * 1024, "Prompt exceeds 256 KiB");
         let session = self.session(id)?;
@@ -587,7 +607,7 @@ impl CodexBridge {
                 )
                 .await
             {
-                Ok(_) => return Ok(true),
+                Ok(_) => return Ok((true, turn)),
                 Err(error) => {
                     let rejected = error.downcast_ref::<CallFailure>().and_then(|failure| {
                         if let CallFailure::Rejected(value) = failure {
@@ -652,7 +672,7 @@ impl CodexBridge {
                 if !state.completed.contains(turn) {
                     state.active = Some(turn.to_owned());
                 }
-                Ok(false)
+                Ok((false, turn.to_owned()))
             }
             Err(error) => Err(error),
         }
@@ -1033,10 +1053,18 @@ impl CodexBridge {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DirectoryMode {
+    Existing,
+    Create,
+    Unique,
+}
+
 fn resolve_session_workspace(
     root: &Path,
     requested: &str,
     protected: &[PathBuf],
+    mode: DirectoryMode,
 ) -> Result<PathBuf> {
     ensure!(
         requested.len() <= 4096 && !requested.contains('\0'),
@@ -1091,6 +1119,14 @@ fn resolve_session_workspace(
             Err(error) => return Err(error).context("Inspect session directory"),
         }
     }
+    ensure!(
+        mode != DirectoryMode::Existing || missing.is_empty(),
+        "Prepared workspace does not exist on the server; prepare the directory before creating a thread"
+    );
+    ensure!(
+        mode != DirectoryMode::Unique || !missing.is_empty(),
+        "Automatic session directory already exists"
+    );
     let mut directory = ancestor
         .canonicalize()
         .context("Resolve session directory ancestor")?;
@@ -1112,7 +1148,8 @@ fn resolve_session_workspace(
             .any(|path| destination.starts_with(path) || path.starts_with(&destination)),
         "Session directory overlaps server state or another open session's workspace"
     );
-    for component in missing.into_iter().rev() {
+    let missing_count = missing.len();
+    for (index, component) in missing.into_iter().rev().enumerate() {
         directory = directory
             .canonicalize()
             .context("Resolve session directory parent")?;
@@ -1123,7 +1160,9 @@ fn resolve_session_workspace(
         directory.push(component);
         match fs::create_dir(&directory) {
             Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error)
+                if error.kind() == std::io::ErrorKind::AlreadyExists
+                    && (mode != DirectoryMode::Unique || index + 1 < missing_count) => {}
             Err(error) => return Err(error).context("Create session directory"),
         }
         directory = directory
@@ -1147,7 +1186,7 @@ fn resolve_session_workspace(
     Ok(directory)
 }
 
-fn create_session_workspace(root: &Path, name: &str) -> Result<PathBuf> {
+fn create_session_workspace(root: &Path, name: &str, protected: &[PathBuf]) -> Result<PathBuf> {
     let mut slug = String::new();
     for character in name.chars() {
         if slug.len() >= 40 {
@@ -1163,16 +1202,14 @@ fn create_session_workspace(root: &Path, name: &str) -> Result<PathBuf> {
     let slug = if slug.is_empty() { "thread" } else { slug };
     // The fixed prefix also avoids Windows device names such as CON and NUL.
     // Exclusive creation ensures an existing directory is never reused.
-    let workspace = root.join(format!("session-{slug}-{}", Uuid::new_v4()));
-    fs::create_dir(&workspace)
-        .with_context(|| format!("Create session workspace {}", workspace.display()))?;
-    let workspace = workspace
-        .canonicalize()
-        .context("Resolve new session workspace")?;
-    ensure!(
-        workspace.parent() == Some(root),
-        "Session workspace must be directly inside the configured root"
-    );
+    // Apply the same containment and overlap checks to the automatic subfolder
+    // as prepared directories, before creating anything beneath it.
+    let workspace = resolve_session_workspace(
+        root,
+        &format!("codex-lan-threads/session-{slug}-{}", Uuid::new_v4()),
+        protected,
+        DirectoryMode::Unique,
+    )?;
     // Session directories are user artifacts. They survive failed creation,
     // native thread deletion, and shutdown; only cleanup journal files are erased.
     Ok(workspace)
@@ -1516,6 +1553,11 @@ fn handle_notification(inner: &Arc<Inner>, method: &str, params: &Value) {
             }
             Some(ServerEvent::TurnStarted {
                 session_id: id.into(),
+                turn_id: params
+                    .pointer("/turn/id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .into(),
             })
         }
         "turn/completed" => {
@@ -1547,6 +1589,11 @@ fn handle_notification(inner: &Arc<Inner>, method: &str, params: &Value) {
             }
             Some(ServerEvent::TurnFinished {
                 session_id: id.into(),
+                turn_id: params
+                    .pointer("/turn/id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .into(),
                 status: params
                     .pointer("/turn/status")
                     .and_then(Value::as_str)

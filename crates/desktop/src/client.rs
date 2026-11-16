@@ -1,7 +1,9 @@
 //! Client session state and network lifecycle.
 
+mod observer;
 mod transcript;
 mod view;
+pub(crate) use observer::SessionObserver;
 
 use crate::*;
 use codex_lan_core::{
@@ -542,7 +544,7 @@ impl ClientApp {
         if demo {
             app.connected = true;
             app.address = "192.168.1.42:7331".into();
-            app.workspace = "/data/scratch/codex-lan-threads".into();
+            app.workspace = "/data/scratch".into();
             let mut session = Session::new(
                 "demo-01".into(),
                 "Optics datasheet".into(),

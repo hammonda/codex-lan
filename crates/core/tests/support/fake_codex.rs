@@ -55,6 +55,7 @@ fn native_output(thread: &str, turn: &str) {
 
 fn main() {
     let mut active_turns = HashMap::<String, String>::new();
+    let mut questions = HashMap::<String, (String, String)>::new();
     let mut log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -70,6 +71,20 @@ fn main() {
         let Some(id) = message.get("id").cloned() else {
             continue;
         };
+        if message.get("method").is_none() {
+            if let Some((thread, turn)) = questions.remove(&id.to_string()) {
+                let answer = message
+                    .pointer("/result/answers/choice/answers/0")
+                    .and_then(Value::as_str)
+                    .unwrap_or("missing");
+                send(
+                    json!({"method":"item/completed","params":{"threadId":thread,"turnId":turn,"item":{"id":"question-answer","type":"agentMessage","text":format!("Answer: {answer}")}}}),
+                );
+                active_turns.remove(&thread);
+                complete(&thread, &turn, "completed");
+            }
+            continue;
+        }
         let method = message["method"].as_str().unwrap_or("");
         let params = &message["params"];
         let thread = params["threadId"].as_str().unwrap_or("");
@@ -127,6 +142,12 @@ fn main() {
                 );
             }
             "turn/start" => {
+                let prompt = params["input"][0]["text"]
+                    .as_str()
+                    .unwrap_or("")
+                    .split("\n\n[Bridge handoff]\n")
+                    .next()
+                    .unwrap();
                 let turn = uuid::Uuid::new_v4().to_string();
                 active_turns.insert(thread.into(), turn.clone());
                 let item = uuid::Uuid::new_v4().to_string();
@@ -136,13 +157,61 @@ fn main() {
                 send(
                     json!({"method":"turn/started","params":{"threadId":thread,"turn":{"id":turn,"status":"inProgress"}}}),
                 );
-                if params["input"][0]["text"] == "wait until interrupted" {
+                if prompt == "wait until interrupted" {
                     continue;
                 }
-                if params["input"][0]["text"] == "show native output" {
+                if prompt == "exit during turn" {
+                    return;
+                }
+                if prompt == "ask a question" {
+                    let request = json!(format!("question-{turn}"));
+                    questions.insert(request.to_string(), (thread.into(), turn.clone()));
+                    send(
+                        json!({"id":request,"method":"item/tool/requestUserInput","params":{"threadId":thread,"turnId":turn,"itemId":"question","questions":[{"id":"choice","header":"Target","question":"Which target?","options":[{"label":"Linux","description":"Linux target"},{"label":"Windows","description":"Windows target"}]}]}}),
+                    );
+                    continue;
+                }
+                if prompt == "read prepared task" {
+                    let workspace = std::path::Path::new(params["cwd"].as_str().unwrap());
+                    let task = std::fs::read_to_string(workspace.join("TASK.md")).unwrap();
+                    std::fs::write(workspace.join("result.txt"), &task).unwrap();
+                    send(
+                        json!({"method":"item/completed","params":{"threadId":thread,"turnId":turn,"item":{"id":item,"type":"agentMessage","text":format!("Prepared task: {task}")}}}),
+                    );
+                    active_turns.remove(thread);
+                    complete(thread, &turn, "completed");
+                    continue;
+                }
+                if prompt == "show native output" {
                     native_output(thread, &turn);
                 }
-                if params["input"][0]["text"] == "show large output" {
+                if prompt == "noisy delegation" {
+                    native_output(thread, &turn);
+                    for index in 0..60 {
+                        send(
+                            json!({"method":"item/completed","params":{"threadId":thread,"turnId":turn,"item":{"id":format!("commentary-{index}"),"type":"agentMessage","phase":"commentary","text":format!("HUMAN-ONLY-PROGRESS {index}: {}", "checking the implementation; ".repeat(100))}}}),
+                        );
+                    }
+                    send(
+                        json!({"method":"item/completed","params":{"threadId":thread,"turnId":turn,"item":{"id":item,"type":"agentMessage","phase":"final_answer","text":"Done. Tests pass; see result.txt."}}}),
+                    );
+                    // A trailing commentary message must not replace the explicit final.
+                    send(
+                        json!({"method":"item/completed","params":{"threadId":thread,"turnId":turn,"item":{"id":"trailer","type":"agentMessage","phase":"commentary","text":"HUMAN-ONLY-TRAILER"}}}),
+                    );
+                    active_turns.remove(thread);
+                    complete(thread, &turn, "completed");
+                    continue;
+                }
+                if prompt == "long final answer" {
+                    send(
+                        json!({"method":"item/completed","params":{"threadId":thread,"turnId":turn,"item":{"id":item,"type":"agentMessage","phase":"final_answer","text":"résumé🙂\n".repeat(1500)}}}),
+                    );
+                    active_turns.remove(thread);
+                    complete(thread, &turn, "completed");
+                    continue;
+                }
+                if prompt == "show large output" {
                     send(
                         json!({"method":"item/commandExecution/outputDelta","params":{"threadId":thread,"turnId":turn,"itemId":"large-command","delta":"x".repeat(2 * 1024 * 1024)}}),
                     );

@@ -1,5 +1,6 @@
 mod allowance_ui;
 mod client;
+mod instance;
 mod json_view;
 mod prompt;
 mod server;
@@ -321,13 +322,38 @@ pub fn run_client(demo: bool) -> eframe::Result {
     )
 }
 
-pub fn run_server(demo: bool) -> eframe::Result {
+pub fn run_server(demo: bool, start: bool, connection_file: Option<PathBuf>) -> eframe::Result {
+    let instance = if demo {
+        None
+    } else {
+        match instance::ServerInstance::acquire(&state_directory())
+            .map_err(|error| eframe::Error::AppCreation(Box::new(error)))?
+        {
+            Some(instance) => Some(instance),
+            None => return Ok(()),
+        }
+    };
+    let mut native_options = options();
+    native_options.viewport = native_options
+        .viewport
+        .with_app_id("codex-lan-server")
+        .with_icon(
+            eframe::icon_data::from_png_bytes(include_bytes!(
+                "../../../assets/codex-lan-server.png"
+            ))
+            .expect("Bundled server icon"),
+        );
     eframe::run_native(
         "Codex LAN / Server",
-        options(),
+        native_options,
         Box::new(move |cc| {
             theme(&cc.egui_ctx);
-            Ok(Box::new(server::ServerApp::new(demo)))
+            Ok(Box::new(server::ServerApp::launch(
+                demo,
+                start,
+                connection_file,
+                instance,
+            )))
         }),
     )
 }

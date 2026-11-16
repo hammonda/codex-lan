@@ -28,7 +28,10 @@ pub(super) fn native_record_ui(ui: &mut egui::Ui, index: usize, record: &NativeR
         RED
     } else if record.method.contains("reasoning") || kind == "reasoning" {
         LILAC
-    } else if record.method.contains("plan") || kind == "userMessage" {
+    } else if record.method.starts_with("client/")
+        || record.method.contains("plan")
+        || kind == "userMessage"
+    {
         CYAN
     } else if record.method.contains("agentMessage") || kind == "agentMessage" {
         MINT

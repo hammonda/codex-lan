@@ -130,7 +130,7 @@ impl ClientApp {
                     }
                 }).response.on_hover_text("Choose a model to select its supported effort. With no model selected, both inherit the server's Codex configuration.");
             });
-            ui.add(egui::TextEdit::singleline(&mut self.new_workspace).desired_width(f32::INFINITY).hint_text("Folder · automatic if blank")).on_hover_text(format!("Optional server directory inside {}. Relative paths start at this root. An existing directory can be used. Blank creates a unique folder. Files remain after session closure.", self.workspace));
+            ui.add(egui::TextEdit::singleline(&mut self.new_workspace).desired_width(f32::INFINITY).hint_text("Folder · automatic if blank")).on_hover_text(format!("Optional server directory inside {}. Relative paths start at this root. An existing directory can be used. Blank creates a unique folder under codex-lan-threads/ inside this root. Files remain after session closure.", self.workspace));
             ui.horizontal(|ui| {
                 create = ui.button("create →").clicked();
                 if icon(ui, "↻", "Refresh available models from Codex").clicked() { self.send(ClientCommand::ListModels); }
@@ -147,6 +147,7 @@ impl ClientApp {
                 effort: self.new_effort.clone(),
                 workspace: (!self.new_workspace.trim().is_empty())
                     .then(|| self.new_workspace.trim().into()),
+                ..Default::default()
             };
             if self.send(ClientCommand::NewSession { name, options }) {
                 self.new_pending = true;

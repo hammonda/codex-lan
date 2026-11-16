@@ -4,7 +4,7 @@ mod support;
 
 use codex_lan_core::{
     bridge::{BridgeConfig, CodexBridge},
-    protocol::ServerEvent,
+    protocol::{ServerEvent, SessionOptions},
 };
 use serde_json::json;
 use std::{collections::HashSet, path::Path, time::Duration};
@@ -52,7 +52,10 @@ async fn sessions_use_separate_directories_and_keep_their_files_after_cleanup() 
         let id = bridge.new_session(name).await.unwrap();
         let workspace = bridge.session_workspace(&id).unwrap();
         assert!(workspace.is_dir());
-        assert_eq!(workspace.parent(), Some(root.as_path()));
+        assert_eq!(
+            workspace.parent(),
+            Some(root.join("codex-lan-threads").as_path())
+        );
         assert_eq!(workspace.canonicalize().unwrap(), workspace);
         let basename = workspace.file_name().unwrap().to_str().unwrap();
         assert!(!basename.contains(['/', '\\', ':']));
@@ -157,4 +160,83 @@ async fn sessions_use_separate_directories_and_keep_their_files_after_cleanup() 
             .next()
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn prepared_context_outside_automatic_folders_preserves_workspace_boundaries() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let bridge = CodexBridge::start(BridgeConfig {
+        executable: env!("CARGO_BIN_EXE_fake-codex").into(),
+        workspace: root.clone(),
+        state_dir: temp.path().join("state"),
+        model: None,
+    })
+    .await
+    .unwrap();
+    let prepared = root.join("project/context");
+    std::fs::create_dir_all(&prepared).unwrap();
+    let context = bridge
+        .new_session_with_options(
+            "Claude context",
+            &SessionOptions {
+                workspace: Some("project/context".into()),
+                require_existing_workspace: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let desktop = bridge.new_session("Desktop").await.unwrap();
+    let automatic = root.join("codex-lan-threads").canonicalize().unwrap();
+    assert_eq!(
+        bridge.session_workspace(&context).unwrap(),
+        prepared.canonicalize().unwrap()
+    );
+    assert_eq!(
+        bridge.session_workspace(&desktop).unwrap().parent(),
+        Some(automatic.as_path())
+    );
+    let creations = support::calls(&root);
+    for creation in creations
+        .iter()
+        .filter(|call| call["method"] == "thread/start")
+    {
+        // A wider selection root must not widen an individual thread's write access.
+        assert_eq!(
+            creation["params"]["config"]["sandbox_workspace_write.writable_roots"],
+            json!([creation["params"]["cwd"]])
+        );
+        assert_ne!(
+            creation["params"]["cwd"],
+            json!(root.canonicalize().unwrap())
+        );
+    }
+    bridge.close_session(&desktop).await.unwrap();
+    let parent = bridge
+        .new_session_with_options(
+            "Use automatic parent",
+            &SessionOptions {
+                workspace: Some("codex-lan-threads".into()),
+                require_existing_workspace: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let before = std::fs::read_dir(&automatic).unwrap().count();
+    assert!(bridge.new_session("Must not overlap").await.is_err());
+    assert_eq!(std::fs::read_dir(&automatic).unwrap().count(), before);
+    bridge.close_session(&parent).await.unwrap();
+
+    #[cfg(unix)]
+    {
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::rename(&automatic, root.join("retained-sessions")).unwrap();
+        std::os::unix::fs::symlink(&outside, &automatic).unwrap();
+        assert!(bridge.new_session("Must not escape").await.is_err());
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    }
+    bridge.shutdown().await.unwrap();
 }

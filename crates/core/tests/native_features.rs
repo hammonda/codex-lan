@@ -87,6 +87,7 @@ async fn catalog_choices_and_effort_reach_native_creation_and_followup_turns() {
                 model: Some("fixture-fast".into()),
                 effort: Some("medium".into()),
                 workspace: None,
+                ..Default::default()
             },
         )
         .await

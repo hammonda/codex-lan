@@ -1,0 +1,31 @@
+[package]
+name = "codex-lan-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+test-support = []
+
+[[bin]]
+name = "codex-lan-mcp"
+path = "src/main.rs"
+
+[[bin]]
+name = "fake-codex-mcp"
+path = "../core/tests/support/fake_codex.rs"
+required-features = ["test-support"]
+
+[dependencies]
+codex-lan-core = { path = "../core" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+uuid.workspace = true
+rmcp = { version = "=3.5.1", default-features = false, features = ["server", "macros", "transport-io"] }
+
+[dev-dependencies]
+tempfile.workspace = true

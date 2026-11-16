@@ -4,6 +4,8 @@ Rust/egui desktop client and server for running Codex across a LAN, on Linux or 
 
 [Client preview](docs/images/client.png) · [Server preview](docs/images/server.png) · [Verification](docs/VERIFICATION.md)
 
+**Claude Code:** use the [MCP bridge and delegation skill](docs/CLAUDE.md) to offload subtasks into prepared server directories. One `delegate` call handles waiting and cleanup, returning only the result; the full trace stays in the server inspector.
+
 ## Build and run
 
 Use Rust 1.95 or later. Linux needs a C compiler and the desktop libraries listed below; Windows needs the MSVC toolchain and Visual Studio C++ Build Tools.
@@ -38,14 +40,20 @@ The server shows each session's client computer name, LAN address, model, effort
 
 The client's **week** badge shows the account's reported weekly allowance remaining. It refreshes from native account events and periodic metadata queries, without model inference.
 
+Click a session name on the server to inspect both directions in arrival order. Each entry identifies Claude/client → Codex or Codex → Claude/client, with a sequence number and elapsed time. Steering splits streaming replies at the correct point. Switch between Replies, Progress, Tools and Everything; expand text or JSON and copy individual messages or the transcript. Scrolling up pauses following; **↓ latest** returns to new output. The inspector is read-only and retains up to 8 MiB/5,000 events per session and the last 8 closed sessions in memory; closing the server window clears them.
+
+Use **Claude ↓** to save the local pairing file and remember automatic refresh after server restarts. The MCP adapter reconnects for new work; interrupted threads are deleted and prompts are never replayed.
+
+On Linux, install the server icon and launcher with `python3 tools/install-linux-desktop.py --pin` (GNOME). It starts the server and maintains the local Claude connection file. Opening it again reuses the existing server and requests window focus or dock attention, depending on the desktop. Omit `--pin` for other desktops, then pin **Codex LAN Server** from their application menu.
+
 ## Workspaces and session lifetime
 
-- The default server workspace root is `/data/scratch/codex-lan-threads` on Linux or `%USERPROFILE%\codex-lan-threads` on Windows. Each session gets a unique subfolder. Clients may override it only with a folder inside that root; live session folders cannot overlap.
+- The default allowed workspace root is `/data/scratch` on Linux or `%USERPROFILE%` on Windows. A blank desktop directory creates a unique folder under `<root>/codex-lan-threads/`. Clients and Claude may select other subdirectories inside the root, such as `/data/scratch/project/context`; live session folders cannot overlap. Each thread gets write access only to its selected folder.
 - Codex gets write access to the session folder and internet access, subject to host policies. Displayed paths refer to the **server's filesystem**; files are not automatically transferred to the client.
 - Threads are named `LAN / <session name>`. Closing a session or client, losing its connection, or stopping the server interrupts affected turns and permanently deletes their native threads. Other clients' sessions remain separate. **Files remain on disk.** There is no session restore or persistent client transcript.
 - Failed deletions are recorded and retried on the next server start. A crash or forced termination can delay cleanup. Keep the state directory outside session workspaces: `$XDG_STATE_HOME/codex-lan` or `~/.local/state/codex-lan` on Linux; `%LOCALAPPDATA%\codex-lan` on Windows.
 
-Use matching app builds when upgrading. Protocol 4 clients remain compatible; older clients report only their IP address. Restarting either app ends its affected sessions.
+Use matching app builds when upgrading. Version 0.5 uses protocol 5; rebuild/restart the server and clients together. Restarting either app ends its affected sessions.
 
 ## Development
 
@@ -65,13 +73,13 @@ cargo test --workspace --all-features --locked
 
 Tests use a local fake Codex process, including loopback TLS connections; they require no account or model calls. The examples under `crates/core/examples` are optional **live** checks and can consume Codex allowance.
 
-`crates/core` contains the Codex bridge, LAN transport and protocol. `crates/desktop/src/client.rs` handles client state; `client/view.rs` and `client/transcript.rs` render it. `server.rs` contains the server dashboard; shared modules implement the theme, JSON viewer, prompt and usage displays.
+`crates/core` contains the Codex bridge, LAN transport, protocol and usage calculations. `crates/mcp` provides the stdio MCP adapter. `crates/desktop/src/client.rs` handles client state; `client/view.rs` and `client/transcript.rs` render it. `server.rs` contains the server dashboard.
 
 For distribution, build the portable targets with Zig/cargo-zigbuild and the MinGW cross toolchain, then package:
 
 ```sh
-cargo zigbuild --release -p codex-lan-desktop --target x86_64-unknown-linux-gnu.2.31 --target-dir target/portable-linux
-cargo build --release -p codex-lan-desktop --target x86_64-pc-windows-gnu --target-dir target/windows
+cargo zigbuild --release -p codex-lan-desktop -p codex-lan-mcp --target x86_64-unknown-linux-gnu.2.31 --target-dir target/portable-linux
+cargo build --release -p codex-lan-desktop -p codex-lan-mcp --target x86_64-pc-windows-gnu --target-dir target/windows
 python3 tools/package.py
 ```
 

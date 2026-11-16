@@ -57,7 +57,7 @@ async fn account_usage_arrives_without_threads_and_disconnect_deletes_busy_and_i
     })
     .await
     .unwrap();
-    assert!(pairing.starts_with("codex-lan-v4:"));
+    assert!(pairing.starts_with("codex-lan-v5:"));
     let connect = || {
         let (commands, rx) = mpsc::unbounded_channel();
         let (events, event_rx) = mpsc::unbounded_channel();

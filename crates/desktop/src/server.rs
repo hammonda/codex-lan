@@ -2,7 +2,7 @@ use crate::*;
 use codex_lan_core::transport::{self, MonitorEvent, ServerConfig};
 use eframe::egui;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     fs::{self, OpenOptions},
     io::{self, Write},
     path::Path,
@@ -18,6 +18,7 @@ struct LiveSession {
     model: Option<String>,
     effort: Option<String>,
     usage: crate::usage::ThreadUsage,
+    observer: crate::client::SessionObserver,
 }
 
 impl LiveSession {
@@ -29,9 +30,20 @@ impl LiveSession {
     }
 }
 
-fn live_session_ui(ui: &mut egui::Ui, id: &str, session: &LiveSession) {
+fn live_session_ui(
+    ui: &mut egui::Ui,
+    id: &str,
+    session: &LiveSession,
+    selected: bool,
+    closed: bool,
+) -> bool {
+    let mut inspect = false;
     ui.horizontal(|ui| {
-        ui.label(mono("●", 10.0, MINT));
+        ui.label(mono(
+            if closed { "○" } else { "●" },
+            10.0,
+            if closed { MUTED } else { MINT },
+        ));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(mono(
                 session.usage.label(session.model.as_deref()),
@@ -43,14 +55,23 @@ fn live_session_ui(ui: &mut egui::Ui, id: &str, session: &LiveSession) {
                 session.usage.tooltip(session.model.as_deref())
             ));
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                terminal_label(
+                let name = terminal_label(
                     ui,
                     &session.name,
                     (ui.available_width() * 0.45).min(220.0),
                     12.0,
-                    INK,
+                    if selected { CYAN } else { INK },
                 )
-                .on_hover_text(format!("{}\nNative thread: {id}", session.name));
+                .interact(egui::Sense::click());
+                name.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::Role::Button, true, &session.name)
+                });
+                inspect |= name
+                    .on_hover_text(format!(
+                        "Inspect both directions of this session\n{}\nNative thread: {id}",
+                        session.name
+                    ))
+                    .clicked();
                 terminal_label(ui, &session.client_label, ui.available_width(), 10.0, CYAN)
                     .on_hover_text(format!(
                         "{}\nConnection: {}",
@@ -83,6 +104,7 @@ fn live_session_ui(ui: &mut egui::Ui, id: &str, session: &LiveSession) {
             }
         });
     });
+    inspect
 }
 
 struct LogEntry {
@@ -96,9 +118,8 @@ fn default_workspace_root() -> PathBuf {
         std::env::var_os("USERPROFILE")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("codex-lan-threads")
     } else {
-        PathBuf::from("/data/scratch/codex-lan-threads")
+        PathBuf::from("/data/scratch")
     }
 }
 
@@ -122,25 +143,83 @@ fn load_workspace_root(path: &Path) -> io::Result<Option<String>> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Missing workspace_root setting"))
 }
 
-fn save_workspace_root(path: &Path, workspace: &str) -> io::Result<()> {
+fn load_connection_file(path: &Path) -> Option<PathBuf> {
+    let settings: serde_json::Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    settings["claude_connection_file"]
+        .as_str()
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
+fn default_connection_file() -> PathBuf {
+    if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(state_directory)
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join(".config")
+            })
+    }
+    .join("codex-lan/connection.json")
+}
+
+fn save_workspace_root(
+    path: &Path,
+    workspace: &str,
+    connection_file: Option<&Path>,
+) -> io::Result<()> {
+    let mut settings = serde_json::json!({"workspace_root": workspace});
+    if let Some(connection_file) = connection_file {
+        settings["claude_connection_file"] = serde_json::json!(connection_file);
+    }
+    write_private_json(path, &settings)
+}
+
+fn save_local_connection(path: &Path, address: &str, pairing_code: &str) -> io::Result<()> {
+    let mut address: std::net::SocketAddr = address
+        .parse()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    if address.ip().is_unspecified() {
+        address.set_ip(if address.is_ipv4() {
+            std::net::Ipv4Addr::LOCALHOST.into()
+        } else {
+            std::net::Ipv6Addr::LOCALHOST.into()
+        });
+    }
+    write_private_json(
+        path,
+        &serde_json::json!({"address":address.to_string(),"pairing_code":pairing_code}),
+    )
+}
+
+fn write_private_json(path: &Path, value: &serde_json::Value) -> io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "Settings path has no parent")
     })?;
     fs::create_dir_all(parent)?;
-    // Only this nonsensitive preference is persisted; session data and pairing codes stay in memory.
-    let contents = serde_json::to_vec_pretty(&serde_json::json!({"workspace_root": workspace}))?;
+    let contents = serde_json::to_vec_pretty(value)?;
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
     let temporary = parent.join(format!(
-        ".server-preferences-{}-{nonce}.tmp",
+        ".codex-lan-settings-{}-{nonce}.tmp",
         std::process::id()
     ));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temporary)?;
     let result = (|| {
         file.write_all(&contents)?;
         file.sync_all()?;
@@ -162,6 +241,7 @@ pub(crate) struct ServerApp {
     codex_path: String,
     model: String,
     state_dir: String,
+    connection_file: Option<PathBuf>,
     ready: bool,
     stopping: bool,
     ready_address: String,
@@ -170,17 +250,22 @@ pub(crate) struct ServerApp {
     show_settings: bool,
     clients: BTreeMap<String, String>,
     sessions: BTreeMap<String, LiveSession>,
+    recent: VecDeque<(String, LiveSession)>,
+    inspected: Option<String>,
     logs: Vec<LogEntry>,
     clock: Instant,
     error: Option<String>,
     close_requested: bool,
     demo: bool,
+    // Release the single-instance lock after the runtime and workers are gone.
+    instance: Option<crate::instance::ServerInstance>,
 }
 
 impl ServerApp {
     pub(crate) fn new(demo: bool) -> Self {
         let saved_workspace = load_workspace_root(&preferences_path());
         let mut app = Self {
+            instance: None,
             runtime: runtime(),
             worker: None,
             receiver: None,
@@ -193,6 +278,7 @@ impl ServerApp {
             codex_path: "codex".into(),
             model: String::new(),
             state_dir: state_directory().display().to_string(),
+            connection_file: load_connection_file(&preferences_path()),
             ready: false,
             stopping: false,
             ready_address: String::new(),
@@ -201,6 +287,8 @@ impl ServerApp {
             show_settings: !demo,
             clients: BTreeMap::new(),
             sessions: BTreeMap::new(),
+            recent: VecDeque::new(),
+            inspected: None,
             logs: vec![],
             clock: Instant::now(),
             error: None,
@@ -220,7 +308,7 @@ impl ServerApp {
         if demo {
             app.ready = true;
             app.ready_address = "0.0.0.0:7331".into();
-            app.workspace = "/data/scratch/codex-lan-threads".into();
+            app.workspace = "/data/scratch".into();
             app.pairing = "DEMO-PAIRING-CODE-NOT-A-REAL-CREDENTIAL".into();
             app.log(
                 "CODEX",
@@ -269,7 +357,31 @@ impl ServerApp {
                     }}}),
                 });
             }
+            if std::env::var_os("CODEX_LAN_DEMO_INSPECTOR").is_some() {
+                app.show_settings = true;
+                let session = app.sessions.get_mut("demo-01").unwrap();
+                session.name = "Claude / Summarize prepared context".into();
+                session.observer.demo_traffic();
+                app.inspected = Some("demo-01".into());
+            }
             app.log("CODEX", "Ready to receive prompts.");
+        }
+        app
+    }
+
+    pub(crate) fn launch(
+        demo: bool,
+        start: bool,
+        connection_file: Option<PathBuf>,
+        instance: Option<crate::instance::ServerInstance>,
+    ) -> Self {
+        let mut app = Self::new(demo);
+        app.instance = instance;
+        if connection_file.is_some() {
+            app.connection_file = connection_file;
+        }
+        if start && !demo {
+            app.start();
         }
         app
     }
@@ -288,6 +400,31 @@ impl ServerApp {
         });
         if self.logs.len() > 500 {
             self.logs.drain(..self.logs.len() - 500);
+        }
+    }
+
+    fn save_for_claude(&mut self) {
+        if !self.ready || self.demo {
+            return;
+        }
+        let path = self
+            .connection_file
+            .clone()
+            .unwrap_or_else(default_connection_file);
+        let result =
+            save_local_connection(&path, &self.ready_address, &self.pairing).and_then(|()| {
+                self.connection_file = Some(path.clone());
+                save_workspace_root(&preferences_path(), &self.workspace, Some(&path))
+            });
+        match result {
+            Ok(()) => self.log(
+                "LOCAL",
+                format!(
+                    "Claude pairing saved: {} · refreshes on server start",
+                    path.display()
+                ),
+            ),
+            Err(error) => self.error = Some(format!("Could not save Claude pairing: {error}")),
         }
     }
 
@@ -387,11 +524,29 @@ impl ServerApp {
                 self.pairing = pairing_code;
                 self.workspace = workspace;
                 self.ready = true;
-                if let Err(error) = save_workspace_root(&preferences_path(), &self.workspace) {
+                if let Err(error) = save_workspace_root(
+                    &preferences_path(),
+                    &self.workspace,
+                    self.connection_file.as_deref(),
+                ) {
                     self.log(
                         "ERROR",
                         format!("Server is running, but the workspace preference could not be saved: {error}"),
                     );
+                }
+                if let Some(path) = self.connection_file.clone() {
+                    match save_local_connection(&path, &self.ready_address, &self.pairing) {
+                        Ok(()) => self.log(
+                            "LOCAL",
+                            format!("MCP connection refreshed: {}", path.display()),
+                        ),
+                        Err(error) => {
+                            let message =
+                                format!("Could not write the local MCP connection file: {error}");
+                            self.log("ERROR", &message);
+                            self.error = Some(message);
+                        }
+                    }
                 }
                 self.log(
                     "LISTEN",
@@ -420,6 +575,11 @@ impl ServerApp {
                 effort,
             } => {
                 let session = LiveSession {
+                    observer: crate::client::SessionObserver::new(
+                        session_id.clone(),
+                        name.clone(),
+                        workspace.clone(),
+                    ),
                     client_label: self
                         .clients
                         .get(&client_id)
@@ -448,6 +608,19 @@ impl ServerApp {
                     session.usage.update(&params);
                 }
             }
+            MonitorEvent::SessionCommand {
+                session_id,
+                command,
+            } => {
+                if let Some(session) = self.sessions.get_mut(&session_id) {
+                    session.observer.command(command);
+                }
+            }
+            MonitorEvent::SessionEvent(event) => {
+                if let Some(session) = event.session_id().and_then(|id| self.sessions.get_mut(id)) {
+                    session.observer.event(event);
+                }
+            }
             MonitorEvent::SessionClosed { session_id } => {
                 if let Some(session) = self.sessions.remove(&session_id) {
                     self.log(
@@ -459,6 +632,10 @@ impl ServerApp {
                             session.usage.label(session.model.as_deref())
                         ),
                     );
+                    self.recent.push_back((session_id, session));
+                    while self.recent.len() > 8 {
+                        self.recent.pop_front();
+                    }
                 }
             }
             MonitorEvent::Log(message) => self.log("CODEX", message),
@@ -474,8 +651,8 @@ impl ServerApp {
         egui::Panel::left("server_settings").default_size(280.0).size_range(220.0..=420.0).frame(panel_frame()).show(ui, |ui| {
             egui::ScrollArea::vertical().id_salt("server_settings_scroll").show(ui, |ui| {
                 ui.add_enabled_ui(self.worker.is_none() && !self.demo, |ui| {
-                    field(ui, "workspace root", &mut self.workspace, "/data/scratch/codex-lan-threads");
-                    ui.label(mono("Clients may choose a folder inside this root.", 10.0, MUTED)).on_hover_text("The root is saved after the server starts. Blank client directory creates a unique folder. Closing a session deletes its native Codex thread immediately, while its files remain.");
+                    field(ui, "workspace root", &mut self.workspace, &default_workspace_root().display().to_string());
+                    ui.label(mono("Clients may choose a folder inside this root.", 10.0, MUTED)).on_hover_text("The root is saved after the server starts. Blank client directory creates a unique folder under codex-lan-threads/ inside this root. Each thread gets write access to its selected folder. Closing a session deletes its native Codex thread immediately, while its files remain.");
                     field(ui, "listen", &mut self.bind, "0.0.0.0:7331");
                     egui::CollapsingHeader::new("advanced").show(ui, |ui| {
                         field(ui, "codex executable", &mut self.codex_path, "codex");
@@ -523,19 +700,91 @@ impl ServerApp {
                             .on_hover_text(&self.workspace);
                     });
                 });
-                if !self.sessions.is_empty() {
+                if !self.sessions.is_empty() || !self.recent.is_empty() {
                     egui::ScrollArea::vertical()
                         .id_salt("active_sessions")
                         .max_height(150.0)
                         .show(ui, |ui| {
                             for (id, session) in &self.sessions {
                                 ui.push_id(id, |ui| {
-                                    live_session_ui(ui, id, session);
+                                    if live_session_ui(
+                                        ui,
+                                        id,
+                                        session,
+                                        self.inspected.as_ref() == Some(id),
+                                        false,
+                                    ) {
+                                        self.inspected = Some(id.clone());
+                                    }
+                                });
+                            }
+                            if !self.recent.is_empty() {
+                                egui::CollapsingHeader::new("recently closed").show(ui, |ui| {
+                                    for (id, session) in self.recent.iter().rev() {
+                                        ui.push_id(id, |ui| {
+                                            if live_session_ui(
+                                                ui,
+                                                id,
+                                                session,
+                                                self.inspected.as_ref() == Some(id),
+                                                true,
+                                            ) {
+                                                self.inspected = Some(id.clone());
+                                            }
+                                        });
+                                    }
                                 });
                             }
                         });
                 }
                 ui.separator();
+                if let Some(id) = self.inspected.clone() {
+                    let closed = !self.sessions.contains_key(&id);
+                    let selected = self.sessions.get_mut(&id).or_else(|| {
+                        self.recent
+                            .iter_mut()
+                            .find(|(recent_id, _)| recent_id == &id)
+                            .map(|(_, session)| session)
+                    });
+                    if let Some(session) = selected {
+                        ui.horizontal(|ui| {
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if icon(ui, "×", "Close inspector and show server events")
+                                        .clicked()
+                                    {
+                                        self.inspected = None;
+                                    }
+                                    ui.with_layout(
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                            terminal_label(
+                                                ui,
+                                                &session.name,
+                                                ui.available_width() * 0.6,
+                                                12.0,
+                                                CYAN,
+                                            )
+                                            .on_hover_text(&session.name);
+                                            terminal_label(
+                                                ui,
+                                                &session.client_label,
+                                                ui.available_width(),
+                                                10.0,
+                                                MUTED,
+                                            )
+                                            .on_hover_text(&session.client_label);
+                                        },
+                                    );
+                                },
+                            );
+                        });
+                        session.observer.ui(ui, closed);
+                        return;
+                    }
+                    self.inspected = None;
+                }
                 ui.horizontal(|ui| {
                     ui.label(mono("events", 11.0, MUTED));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -589,6 +838,9 @@ impl ServerApp {
 
 impl eframe::App for ServerApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if let Some(instance) = &mut self.instance {
+            instance.poll(ctx);
+        }
         self.drain();
         closing(ctx, &mut self.close_requested, &self.worker);
     }
@@ -611,8 +863,9 @@ impl eframe::App for ServerApp {
                     if icon(ui, "☰", "Show or hide host settings").clicked() {
                         self.show_settings = !self.show_settings;
                     }
-                    ui.label(mono("codex / host", 13.0, INK))
-                        .on_hover_text(format!("v{}", env!("CARGO_PKG_VERSION")));
+                    ui.label(mono("codex / host", 13.0, INK));
+                    ui.label(mono(concat!("v", env!("CARGO_PKG_VERSION")), 11.0, CYAN))
+                        .on_hover_text("Version of this running server");
                     ui.label(mono(format!("● {status}"), 10.0, color));
                     if self.ready {
                         ui.label(mono(&self.ready_address, 11.0, MUTED));
@@ -620,6 +873,10 @@ impl eframe::App for ServerApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if self.ready && icon(ui, "⧉", "Copy pairing code").clicked() {
                             ui.ctx().copy_text(self.pairing.clone());
+                        }
+                        if ui.add_enabled(self.ready && !self.demo, egui::Button::new(mono("Claude ↓", 11.0, CYAN)))
+                            .on_hover_text(format!("Save pairing for Claude\n{}\nAutomatically refreshes after server restarts.", self.connection_file.clone().unwrap_or_else(default_connection_file).display())).clicked() {
+                            self.save_for_claude();
                         }
                         ui.add_enabled_ui(!self.demo && !self.stopping, |ui| {
                             if self.worker.is_some() {

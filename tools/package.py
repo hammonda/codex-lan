@@ -10,13 +10,13 @@ dist = root / "dist"
 dist.mkdir(exist_ok=True)
 linux = root / "target/portable-linux/x86_64-unknown-linux-gnu/release"
 windows = root / "target/windows/x86_64-pc-windows-gnu/release"
-shared = [root / "README.md", root / "LICENSE", root / "docs/VERIFICATION.md"]
+shared = [root / name for name in ("README.md", "LICENSE", "docs/VERIFICATION.md", "docs/CLAUDE.md", "skills/codex-delegate/SKILL.md", "assets/codex-lan-server.svg", "assets/codex-lan-server.png", "tools/install-linux-desktop.py")]
 shared += sorted((root / "docs/images").glob("*.png"))
 artifacts = []
 
 linux_archive = dist / "codex-lan-linux-x64.tar.gz"
 with tarfile.open(linux_archive, "w:gz") as archive:
-    for name in ("codex-lan-client", "codex-lan-server"):
+    for name in ("codex-lan-client", "codex-lan-server", "codex-lan-mcp"):
         archive.add(linux / name, arcname=f"codex-lan/{name}")
     for file in shared:
         archive.add(file, arcname="codex-lan/" + file.relative_to(root).as_posix())
@@ -24,7 +24,7 @@ artifacts.append(linux_archive)
 
 windows_archive = dist / "codex-lan-windows-x64.zip"
 with zipfile.ZipFile(windows_archive, "w", zipfile.ZIP_DEFLATED) as archive:
-    for name in ("codex-lan-client.exe", "codex-lan-server.exe"):
+    for name in ("codex-lan-client.exe", "codex-lan-server.exe", "codex-lan-mcp.exe"):
         archive.write(windows / name, f"codex-lan/{name}")
     for file in shared:
         archive.write(file, "codex-lan/" + file.relative_to(root).as_posix())
@@ -36,7 +36,7 @@ with zipfile.ZipFile(source_archive, "w", zipfile.ZIP_DEFLATED) as archive:
         root / name
         for name in ("Cargo.toml", "Cargo.lock", "README.md", "LICENSE", ".gitignore", ".gitattributes")
     ]
-    for directory in ("crates", "docs", "tools", ".github"):
+    for directory in ("crates", "docs", "tools", "skills", "assets", ".github"):
         files += [p for p in (root / directory).rglob("*") if p.is_file() and "__pycache__" not in p.parts]
     for file in sorted(files):
         archive.write(file, "codex-lan/" + file.relative_to(root).as_posix())

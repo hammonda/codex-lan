@@ -30,6 +30,7 @@ async fn main() -> Result<()> {
             model: Some(model.model.clone()),
             effort: model.default_effort.clone(),
             workspace: Some("selected-session-folder".into()),
+            ..Default::default()
         };
         let mut events = bridge.subscribe();
         let id = bridge

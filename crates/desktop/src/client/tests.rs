@@ -328,6 +328,7 @@ fn rejected_steering_preserves_active_turn_and_restores_prompt() {
     });
     app.handle(ServerEvent::TurnStarted {
         session_id: "thread".into(),
+        turn_id: "turn".into(),
     });
     app.sessions[0].pending_prompts = 2;
     app.handle(ServerEvent::PromptRejected {
@@ -345,10 +346,12 @@ fn rejected_steering_preserves_active_turn_and_restores_prompt() {
     assert!(app.sessions[0].active);
     app.handle(ServerEvent::TurnFinished {
         session_id: "thread".into(),
+        turn_id: "turn".into(),
         status: "completed".into(),
     });
     app.handle(ServerEvent::PromptAccepted {
         session_id: "thread".into(),
+        turn_id: "turn".into(),
         steered: true,
     });
     assert!(

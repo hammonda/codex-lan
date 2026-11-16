@@ -2,7 +2,10 @@
 //! for one server run. Codex's own RPC listener is never exposed on the LAN.
 use crate::{
     bridge::{BridgeConfig, CodexBridge},
-    protocol::{ClientCommand, MAX_EVENT_BYTES, MAX_MESSAGE_BYTES, PROTOCOL_VERSION, ServerEvent},
+    protocol::{
+        ClientCommand, ClientRequest, MAX_EVENT_BYTES, MAX_MESSAGE_BYTES, PROTOCOL_VERSION,
+        ServerEvent,
+    },
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -41,7 +44,7 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
-const PAIRING_PREFIX: &str = "codex-lan-v4:";
+const PAIRING_PREFIX: &str = "codex-lan-v5:";
 
 pub struct ServerConfig {
     pub bind: String,
@@ -78,6 +81,11 @@ pub enum MonitorEvent {
         session_id: String,
         params: serde_json::Value,
     },
+    SessionCommand {
+        session_id: String,
+        command: ClientCommand,
+    },
+    SessionEvent(ServerEvent),
     SessionClosed {
         session_id: String,
     },
@@ -85,6 +93,7 @@ pub enum MonitorEvent {
     Stopped,
 }
 
+#[derive(Clone)]
 pub struct ClientConfig {
     /// Socket address or DNS name with port, for example `192.168.1.10:7331`.
     pub address: String,
@@ -443,7 +452,14 @@ where
                 event = result_rx.recv() => {
                     let Some(event) = event else { bail!("Session worker stopped"); };
                     send_event(&mut socket, &event).await?;
-                    if let ServerEvent::SessionStarted { session_id, .. } = &event {
+                    let lifecycle = match &event {
+                        ServerEvent::CommandResult { event: Some(inner), .. } => inner.as_ref(),
+                        other => other,
+                    };
+                    if lifecycle.session_id().is_some() {
+                        let _ = monitor.send(MonitorEvent::SessionEvent(lifecycle.clone()));
+                    }
+                    if let ServerEvent::SessionStarted { session_id, .. } = lifecycle {
                         // Publish buffered native creation events only after the
                         // client knows which session those events belong to.
                         bridge.publish_session(session_id)?;
@@ -458,7 +474,8 @@ where
                     last_seen = Instant::now();
                     match incoming? {
                         Message::Text(text) => {
-                            let command: ClientCommand = serde_json::from_str(&text).context("Invalid client command")?;
+                            let command: ClientRequest = serde_json::from_str(&text).context("Invalid client command")?;
+                            ensure!(command.command_id.as_ref().is_none_or(|id| !id.is_empty() && id.len() <= 128), "Invalid command ID");
                             command_tx.try_send(command).context("Too many pending client commands")?;
                         }
                         Message::Ping(bytes) => send_message(&mut socket, Message::Pong(bytes)).await?,
@@ -481,6 +498,9 @@ where
                             });
                         }
                         send_event(&mut socket, &event).await?;
+                        if event.session_id().is_some() {
+                            let _ = monitor.send(MonitorEvent::SessionEvent(event));
+                        }
                     }
                 }
             }
@@ -531,7 +551,7 @@ where
 async fn command_worker(
     bridge: CodexBridge,
     sessions: OwnedSessions,
-    mut commands: mpsc::Receiver<ClientCommand>,
+    mut commands: mpsc::Receiver<ClientRequest>,
     results: mpsc::Sender<ServerEvent>,
     monitor: mpsc::UnboundedSender<MonitorEvent>,
     client_id: String,
@@ -543,14 +563,22 @@ async fn command_worker(
             _ = stop.cancelled() => break,
             command = commands.recv() => match command { Some(value) => value, None => break },
         };
-        let session_id = command_session_id(&command).map(str::to_owned);
-        let result = handle_command(&bridge, &sessions, command, &monitor, &client_id).await;
+        let session_id = command_session_id(&command.command).map(str::to_owned);
+        let result =
+            handle_command(&bridge, &sessions, command.command, &monitor, &client_id).await;
         let event = match result {
             Ok(event) => event,
             Err(error) => Some(ServerEvent::Error {
                 session_id,
                 message: format!("{error:#}"),
             }),
+        };
+        let event = match command.command_id {
+            Some(command_id) => Some(ServerEvent::CommandResult {
+                command_id,
+                event: event.map(Box::new),
+            }),
+            None => event,
         };
         if let Some(event) = event {
             tokio::select! {
@@ -574,6 +602,10 @@ async fn handle_command(
             owns(sessions, session_id),
             "This session does not belong to this connection"
         );
+        let _ = monitor.send(MonitorEvent::SessionCommand {
+            session_id: session_id.into(),
+            command: command.clone(),
+        });
     }
     match command {
         ClientCommand::ListModels => Ok(Some(ServerEvent::Models {
@@ -620,19 +652,20 @@ async fn handle_command(
                 effort,
             }))
         }
-        ClientCommand::Prompt { session_id, text } => {
-            Ok(Some(match bridge.prompt(&session_id, &text).await {
-                Ok(steered) => ServerEvent::PromptAccepted {
+        ClientCommand::Prompt { session_id, text } => Ok(Some(
+            match bridge.prompt_with_turn(&session_id, &text).await {
+                Ok((steered, turn_id)) => ServerEvent::PromptAccepted {
                     session_id,
                     steered,
+                    turn_id,
                 },
                 Err(error) => ServerEvent::PromptRejected {
                     session_id,
                     text,
                     message: format!("{error:#}"),
                 },
-            }))
-        }
+            },
+        )),
         ClientCommand::Interrupt { session_id } => {
             bridge.interrupt(&session_id).await?;
             Ok(None)
@@ -663,7 +696,26 @@ async fn handle_command(
 /// reconnecting creates new sessions, never revives an abandoned Codex thread.
 pub async fn run_client(
     config: ClientConfig,
-    mut commands: mpsc::UnboundedReceiver<ClientCommand>,
+    commands: mpsc::UnboundedReceiver<ClientCommand>,
+    events: mpsc::UnboundedSender<ServerEvent>,
+    stop: CancellationToken,
+) -> Result<()> {
+    run_client_messages(config, commands, events, stop).await
+}
+
+/// Same connection and ownership rules, with explicit command acknowledgements.
+pub async fn run_client_requests(
+    config: ClientConfig,
+    commands: mpsc::UnboundedReceiver<ClientRequest>,
+    events: mpsc::UnboundedSender<ServerEvent>,
+    stop: CancellationToken,
+) -> Result<()> {
+    run_client_messages(config, commands, events, stop).await
+}
+
+async fn run_client_messages<C: Serialize>(
+    config: ClientConfig,
+    mut commands: mpsc::UnboundedReceiver<C>,
     events: mpsc::UnboundedSender<ServerEvent>,
     stop: CancellationToken,
 ) -> Result<()> {

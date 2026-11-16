@@ -147,8 +147,15 @@ async fn encrypted_lan_sessions_stream_isolate_and_delete() {
         unreachable!()
     };
     let root = temp.path().canonicalize().unwrap();
-    assert_eq!(Path::new(&first_workspace).parent(), Some(root.as_path()));
-    assert_eq!(Path::new(&second_workspace).parent(), Some(root.as_path()));
+    let automatic = root.join("codex-lan-threads");
+    assert_eq!(
+        Path::new(&first_workspace).parent(),
+        Some(automatic.as_path())
+    );
+    assert_eq!(
+        Path::new(&second_workspace).parent(),
+        Some(automatic.as_path())
+    );
     assert_ne!(first_workspace, second_workspace);
     cmd_b
         .send(ClientCommand::Prompt {
@@ -387,6 +394,33 @@ async fn encrypted_lan_sessions_stream_isolate_and_delete() {
         [15, 30],
         "Two connected clients must not duplicate monitor updates"
     );
+    let prompts: Vec<_> = monitor_events
+        .iter()
+        .filter_map(|event| match event {
+            MonitorEvent::SessionCommand {
+                session_id,
+                command: ClientCommand::Prompt { text, .. },
+            } => Some((session_id, text.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        prompts
+            .iter()
+            .filter(|(id, text)| *id == &first && *text == "show native output")
+            .count(),
+        1
+    );
+    assert!(
+        prompts
+            .iter()
+            .any(|(id, text)| *id == &second && *text == "finish after steering")
+    );
+    assert!(!prompts.iter().any(|(_, text)| *text == "must be rejected"));
+    assert!(monitor_events.iter().any(|event| matches!(event,
+        MonitorEvent::SessionEvent(ServerEvent::ItemCompleted { session_id, .. }) if session_id == &first)));
+    assert!(!monitor_events.iter().any(|event| matches!(event,
+        MonitorEvent::SessionEvent(ServerEvent::NativeEvent { params, .. }) if params.to_string().contains("foreign-thread-marker"))));
 }
 
 #[tokio::test]
@@ -480,6 +514,7 @@ async fn closing_client_session_deletes_immediately_and_server_accepts_another()
                     model: Some("fixture-fast".into()),
                     effort: Some("medium".into()),
                     workspace: Some("chosen/working-folder".into()),
+                    ..Default::default()
                 },
             })
             .unwrap();

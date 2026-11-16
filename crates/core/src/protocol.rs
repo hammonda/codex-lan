@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 // A native app-server line can contain up to 16 MiB of tool output. Keep
 // complete events intact while retaining the smaller client-command limit.
@@ -11,8 +11,20 @@ pub const MAX_EVENT_BYTES: usize = 32 * 1024 * 1024;
 pub struct SessionOptions {
     pub model: Option<String>,
     pub effort: Option<String>,
-    /// Exact server-side directory within the configured root. Blank allocates a new folder.
+    /// Exact server-side directory within the root. Blank allocates under codex-lan-threads/.
     pub workspace: Option<String>,
+    /// Prepared handoffs must exist already; never silently create an empty folder.
+    #[serde(default)]
+    pub require_existing_workspace: bool,
+}
+
+/// Optional correlation for headless clients. GUI commands still work without an ID.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_id: Option<String>,
+    #[serde(flatten)]
+    pub command: ClientCommand,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +91,10 @@ pub enum ClientCommand {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerEvent {
+    CommandResult {
+        command_id: String,
+        event: Option<Box<ServerEvent>>,
+    },
     AccountUsage {
         usage: AccountUsage,
     },
@@ -105,6 +121,7 @@ pub enum ServerEvent {
     PromptAccepted {
         session_id: String,
         steered: bool,
+        turn_id: String,
     },
     PromptRejected {
         session_id: String,
@@ -123,9 +140,11 @@ pub enum ServerEvent {
     },
     TurnStarted {
         session_id: String,
+        turn_id: String,
     },
     TurnFinished {
         session_id: String,
+        turn_id: String,
         status: String,
     },
     Activity {
@@ -154,6 +173,7 @@ pub enum ServerEvent {
 impl ServerEvent {
     pub fn session_id(&self) -> Option<&str> {
         match self {
+            Self::CommandResult { .. } => None,
             Self::Welcome { .. } | Self::Models { .. } | Self::AccountUsage { .. } => None,
             Self::Error { session_id, .. } => session_id.as_deref(),
             Self::SessionStarted { session_id, .. }
@@ -162,7 +182,7 @@ impl ServerEvent {
             | Self::PromptRejected { session_id, .. }
             | Self::Delta { session_id, .. }
             | Self::ItemCompleted { session_id, .. }
-            | Self::TurnStarted { session_id }
+            | Self::TurnStarted { session_id, .. }
             | Self::TurnFinished { session_id, .. }
             | Self::Activity { session_id, .. }
             | Self::Request { session_id, .. }
